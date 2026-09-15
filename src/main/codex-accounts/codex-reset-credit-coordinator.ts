@@ -157,7 +157,7 @@ export class CodexResetCreditCoordinator {
       if (this.ledger.hasPendingForTarget(target)) {
         throw new Error('A previous reset attempt for this target still has an unknown outcome.')
       }
-      const homeResolution = this.dependencies.runtimeHome.prepareForRateLimitFetch(target)
+      const homeResolution = await this.dependencies.runtimeHome.prepareForRateLimitFetch(target)
       // Why: reject before the provider mutation — a skip must never be spent
       // against the system-default home (#STA-4422).
       if (homeResolution.kind === 'skip') {
