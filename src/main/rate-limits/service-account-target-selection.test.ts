@@ -532,6 +532,48 @@ describe('RateLimitService', () => {
       expect.arrayContaining([expect.objectContaining({ accountId: 'wsl-account-1' })])
     )
   })
+
+  // Regression: resolveCodexHome now awaits listing running WSL distros, a gap
+  // long enough for a concurrent reset (which never goes through the
+  // isFetching queue) to bump codexFetchGeneration mid-await. The older
+  // cycle must capture its generation before that await, or it reads the
+  // already-bumped generation as its own and re-applies its stale fetch.
+  it('does not apply a stale full-refresh cycle codex result over a newer reset', async () => {
+    const service = new RateLimitService()
+    const staleHome = deferred<{ kind: 'ready'; codexHomePath: string | null }>()
+    const resolver = vi
+      .fn()
+      .mockReturnValueOnce(staleHome.promise)
+      .mockResolvedValue({ kind: 'ready', codexHomePath: '/tmp/approved-selection' })
+    service.setCodexHomePathResolver(resolver)
+    vi.mocked(fetchClaudeRateLimits).mockResolvedValue(okProvider('claude', 10, Date.now()))
+    vi.mocked(fetchCodexRateLimits)
+      .mockResolvedValueOnce(okProvider('codex', 0, Date.now())) // reset flow's own probe
+      .mockResolvedValueOnce(okProvider('codex', 100, Date.now())) // stale cycle, applied late
+    vi.mocked(consumeCodexRateLimitResetCredit).mockResolvedValueOnce('reset')
+
+    const staleRefresh = service.refresh()
+    await vi.waitFor(() => expect(resolver).toHaveBeenCalledTimes(1))
+
+    // Why: consumeCodexRateLimitResetCredit never checks isFetching, so it
+    // runs to completion while the stale cycle's resolveCodexHome call above
+    // is still pending, bumping codexFetchGeneration along the way.
+    await expect(
+      service.consumeCodexRateLimitResetCredit({
+        idempotencyKey: '55555555-5555-4555-8555-555555555555',
+        target: { runtime: 'host', wslDistro: null },
+        codexHomePath: '/tmp/approved-selection'
+      })
+    ).resolves.toMatchObject({ outcome: 'reset' })
+
+    staleHome.resolve({ kind: 'ready', codexHomePath: '/tmp/approved-selection' })
+    await staleRefresh
+
+    // Why: the stale cycle's own fetch result (usedPercent 100) must never
+    // land, whatever the final Codex slot looks like after the reset's own
+    // transitional "fetching" markers settle.
+    expect(service.getState().codex?.session?.usedPercent).not.toBe(100)
+  })
 })
 
 function inactiveCodexAccount(id: string, managedHomePath: string) {
